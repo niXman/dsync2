@@ -286,6 +286,11 @@ int main(int argc, char** argv) {
       usleep(1000);
    }
 
+   for ( idx = 0; idx < nthreads; ++idx ) {
+      pthread_join(threads[idx], NULL);
+   }
+   free(threads);
+
    return 0;
 }
 
@@ -325,6 +330,7 @@ void* thread_proc(void* p) {
       char* path = extract_path(name);
       /* создаю структуру каталогов */
       create_dir_tree(path);
+      free(path);
       /* снимаю блокировку */
       pthread_mutex_unlock(&mutex);
       /* сообщаю о копировании */
@@ -333,6 +339,7 @@ void* thread_proc(void* p) {
       if ( 0 != (err=copy_file(node->name, name, node->date)) ) {
          fprintf(stderr, "error: %s\n", strerror(err));
       }
+      free(name);
    }
    /* декрементирую счетчик запущеных потоков перед выходом */
    threads_count--;
