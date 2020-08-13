@@ -87,9 +87,9 @@ dirlist* get_difference(
 /* функция потока выполняющая копирование файлов */
 void* thread_proc(void* p);
 
-void usage(char* pname) {
+void usage(const char* pname) {
    char* p = strrchr(pname, '/');
-   p = (p)?p+1:"dsync";
+   p = (p)?p+1:"dsync2";
 
    static const char* usage_string =
    "\t--src=dir_name     --  source directory name\n"
@@ -107,6 +107,14 @@ void usage(char* pname) {
    fflush(stdout);
 }
 
+#define DSYNC2_VERSION "0.0.1"
+
+void version(const char *pname) {
+   char* p = strrchr(pname, '/');
+   p = (p)?p+1:"dsync2";
+   printf("%s version %s\n", p, DSYNC2_VERSION);
+}
+
 /***************************************************************************/
 
 int main(int argc, char** argv) {
@@ -121,15 +129,14 @@ int main(int argc, char** argv) {
    /** flags */
    int show_info = 0;
    int show_version = 0;
-   int dont_read_symlinks = 0;
 
    /**  */
-   const char* srcdir; /* имя исходного каталога */
-   const char* dstdir; /* имя каталога назначения */
+   const char* srcdir = NULL; /* имя исходного каталога */
+   const char* dstdir = NULL; /* имя каталога назначения */
 
    /**  */
-   int idx = 0;
-   int nthreads = 2; /* кол-во потоков копирования */
+   unsigned idx = 0;
+   unsigned nthreads = 2; /* кол-во потоков копирования */
 
    /**  */
    dirlist srclist = {0,0,0,0,0}; /* список файлов в исходном каталоге */
@@ -170,11 +177,25 @@ int main(int argc, char** argv) {
       switch ( opt ) {
          case 's': srcdir = optarg; break;
          case 'd': dstdir = optarg; break;
-         case 't': nthreads=atoi(optarg);
+         case 't': nthreads=atoi(optarg); break;
          case 'i': show_info=1; break;
          case 'v': show_version=1; break;
          default: usage(argv[0]); exit(1);
       }
+   }
+
+   if ( show_version ) {
+   	  version(argv[0]);
+      return 0;
+   }
+
+   if ( !srcdir ) {
+      printf("source directory is not specified! terminate.\n");
+      return 1;
+   }
+   if ( !dstdir ) {
+      printf("destination directory is not specified! terminate.\n");
+      return 1;
    }
 
    /**  */
