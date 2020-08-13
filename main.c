@@ -1,13 +1,12 @@
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include <time.h>
 #include <utime.h>
-
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -27,6 +26,11 @@ typedef struct dirlist {
    struct dirlist* next; /* указатель на следующий элемент списка */
 } dirlist;
 
+typedef struct dirinfo_t {
+   u_int64_t nfiles;
+   u_int64_t size;
+} dirinfo;
+
 /* структура данных потока */
 typedef struct thread_data {
    dirlist* dlist; /* указатель на список файлов */
@@ -39,6 +43,10 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; /* мьютекс блоки�
 
 /***************************************************************************/
 
+const char* readable_fs(char *buf, u_int64_t fsize);
+
+const char* readable_pthread_t(char *buf, pthread_t pt);
+
 /* функция, читает содержимое каталога в список */
 dirlist* read_dir_tree(dirlist* dlist, const char* path);
 
@@ -46,16 +54,13 @@ dirlist* read_dir_tree(dirlist* dlist, const char* path);
 dirlist* alloc_next();
 
 /* связывает элементы списка */
-dirlist* link_nodes(dirlist* left, dirlist* right);
+dirlist* link_nodes(dirlist* left, const dirlist* right);
 
 /* получает следующий, еще не скопированный файл */
 dirlist* get_next(dirlist* dlist);
 
 /* возвращает кол-во файлов в списке */
-u_int64_t total_files(dirlist* dlist);
-
-/* возвращает суммарный объем файлов в списке */
-u_int64_t total_size(dirlist* dlist);
+void get_dirinfo(dirinfo *di, const dirlist* dlist);
 
 /* создает имя результирующего файла */
 char* create_dst_filename(const char* srcdir, const char* srcname, const char* dstdir);
@@ -75,8 +80,8 @@ int copy_file(const char* srcname, const char* dstname, time_t srctime);
 /* возвращает список файлов которые необходимо скопировать */
 dirlist* get_difference(
    dirlist* result,
-   dirlist* srclist, const char* srcdir,
-   dirlist* dstlist, const char* dstdir
+   const dirlist* srclist, const char* srcdir,
+   const dirlist* dstlist, const char* dstdir
 );
 
 /* функция потока выполняющая копирование файлов */
@@ -106,11 +111,17 @@ void usage(char* pname) {
 
 int main(int argc, char** argv) {
    /**  */
-   usage(argv[0]);
    if ( argc < 3 ) {
       usage(argv[0]);
       return 1;
    }
+
+   char sizebuf[32] = {0};
+
+   /** flags */
+   int show_info = 0;
+   int show_version = 0;
+   int dont_read_symlinks = 0;
 
    /**  */
    const char* srcdir; /* имя исходного каталога */
@@ -119,24 +130,16 @@ int main(int argc, char** argv) {
    /**  */
    int idx = 0;
    int nthreads = 2; /* кол-во потоков копирования */
-   int src_files = 0; /* кол-во файлов в исходном каталоге */
-   int dst_files = 0; /* кол-во файлов в каталоге назначения */
-   int need_copy_files = 0; /* кол-во файлов к копированию */
-
-   /** flags */
-   int show_info = 0;
-   int show_version = 0;
-   int dont_read_symlinks = 0;
-
-   /**  */
-   u_int64_t src_size = 0; /* суммарный объем исходного каталога */
-   u_int64_t dst_size = 0; /* суммарный объем каталога назначения */
-   u_int64_t need_copy_size = 0; /* суммарный объем файлов к копированию */
 
    /**  */
    dirlist srclist = {0,0,0,0,0}; /* список файлов в исходном каталоге */
    dirlist dstlist = {0,0,0,0,0}; /* список файлов в каталоге назначения */
    dirlist result  = {0,0,0,0,0}; /* список файлов к копированию */
+
+   /**  */
+   dirinfo srcdi = {0,0};
+   dirinfo dstdi = {0,0};
+   dirinfo tocopy= {0,0};
 
    /**  */
    pthread_t* threads; /* указатель на потоки копирования */
@@ -176,11 +179,11 @@ int main(int argc, char** argv) {
 
    /**  */
    if ( access(srcdir, F_OK) ) {
-      printf("source directory is not open! exiting.\n");
+      printf("source directory is not exists! terminate.\n");
       return 1;
    }
    if ( access(dstdir, F_OK) ) {
-      printf("destination directory is not open! exiting.\n");
+      printf("destination directory is not exists! terminate.\n");
       return 1;
    }
 
@@ -188,35 +191,33 @@ int main(int argc, char** argv) {
    read_dir_tree(&srclist, srcdir);
    read_dir_tree(&dstlist, dstdir);
 
-   /* получаю кол-во файлов и объем */
-   src_files = total_files(&srclist);
-   src_size  = total_size(&srclist);
-   dst_files = total_files(&dstlist);
-   dst_size  = total_size(&dstlist);
+   // /* получаю кол-во файлов и объем */
+   get_dirinfo(&srcdi, &srclist);
+   get_dirinfo(&dstdi, &dstlist);
 
    /* если исходный каталог пуст, сообщаю, завершаюсь */
-   if ( !src_files ) {
-      printf("исходный каталог пуст! завершаемся.\n");
+   if ( 0 == srcdi.nfiles ) {
+      printf("source dir is empty! terminate.\n");
       return 0;
    }
 
    /* если указанно не верно - сообщаю, завершаюсь */
-   if ( nthreads <= 0 || nthreads > src_files ) {
-      printf("неверно указанно кол-во потоков копирования. завершаемся.\n");
+   if ( nthreads <= 0 || nthreads > srcdi.nfiles ) {
+      printf("wrong num of threads. terminate.\n");
       return 0;
    }
 
    if ( show_info ) {
       /* вывожу информацию о исходном каталоге */
-      printf("в исходном каталоге   %5d файлов суммарным объемом %lld байт\n",
-             src_files,
-             src_size
+      printf("source dir contains      %5" PRIu64 " files with total size %s\n",
+         srcdi.nfiles,
+         readable_fs(sizebuf, srcdi.size)
       );
 
       /* вывожу информацию о каталоге назначения */
-      printf("в каталоге назначения %5d файлов суммарным объемом %lld байт\n",
-             dst_files,
-             dst_size
+      printf("destination dir contains %5" PRIu64 " files with total size %s\n",
+         dstdi.nfiles,
+         readable_fs(sizebuf, dstdi.size)
       );
    }
 
@@ -224,22 +225,21 @@ int main(int argc, char** argv) {
    get_difference(&result, &srclist, srcdir, &dstlist, dstdir);
 
    /* получаю кол-во файлов и суммарный объем */
-   need_copy_files = total_files(&result);
-   need_copy_size  = total_size(&result);
+   get_dirinfo(&tocopy, &result);
 
    /* если кол-во файлов равно нулю, значит каталоги
       идентичны. сообщаю. завершаюсь.
    */
-   if ( 0 == need_copy_files ) {
-      printf("\nкаталоги идентичны. завершаемся.\n");
+   if ( 0 == tocopy.nfiles ) {
+      printf("\nthe directories are identical. terminate.\n");
       return 0;
    }
 
    if ( show_info ) {
       /* вывожу информацию */
-      printf("необходимо скопировать %d файлов суммарным объемом %lld байт\n",
-             need_copy_files,
-             need_copy_size
+      printf("need to copy %" PRIu64 " files with total size %s\n",
+         tocopy.nfiles,
+         readable_fs(sizebuf, tocopy.size)
       );
    }
 
@@ -272,10 +272,11 @@ int main(int argc, char** argv) {
 /* функция потока которая производит копирование файлов */
 void* thread_proc(void* p) {
    int err;
+   char printbuf[32] = {0};
    /* получаю идентификатор потока */
    pthread_t pid = pthread_self();
    /* сообщаю */
-   printf("process ID %u created\n", (u_int32_t)pid);
+   printf("process ID %s created\n", readable_pthread_t(printbuf, pid));
    /* нормализую указатель на данные потока */
    thread_data* data = (thread_data*)p;
    /* получаю список файлов необходимых к копированию */
@@ -306,7 +307,7 @@ void* thread_proc(void* p) {
       /* снимаю блокировку */
       pthread_mutex_unlock(&mutex);
       /* сообщаю о копировании */
-      printf("process ID %u copying: %s\n", (u_int32_t)pid, node->name);
+      printf("process ID %s copying: %s\n", readable_pthread_t(printbuf, pid), node->name);
       /* копирую */
       if ( 0 != (err=copy_file(node->name, name, node->date)) ) {
          fprintf(stderr, "error: %s\n", strerror(err));
@@ -387,7 +388,7 @@ char* create_src_filename(const char* dstdir, const char* dstname, const char* s
    return result;
 }
 /* находит нод по имени файла */
-dirlist* find_by_filename(dirlist* dlist, const char* fname) {
+const dirlist* find_by_filename(const dirlist* dlist, const char* fname) {
    while ( dlist->name ) {
       if ( 0 == strcmp(dlist->name, fname) ) return dlist;
       dlist = dlist->next;
@@ -397,22 +398,24 @@ dirlist* find_by_filename(dirlist* dlist, const char* fname) {
 /* возвращает разницу в виде списка файлов готовых к копированию */
 dirlist* get_difference(
    dirlist* result,
-   dirlist* srclist, const char* srcdir,
-   dirlist* dstlist, const char* dstdir
+   const dirlist* srclist, const char* srcdir,
+   const dirlist* dstlist, const char* dstdir
 ) {
-   dirlist* src_ptr = srclist;
-   dirlist* dst_ptr = dstlist;
+   const dirlist* src_ptr = srclist;
+   const dirlist* dst_ptr = dstlist;
    dirlist* res_ptr = result;
-   int dst_files = total_files(dstlist);
-   int src_files = total_files(srclist);
+   dirinfo dst_files = {0,0};
+   dirinfo src_files = {0,0};
+   get_dirinfo(&dst_files, dstlist);
+   get_dirinfo(&src_files, srclist);
    /* если каталог назначения пуст, просто копирую весь список файлов */
-   if ( 0 == dst_files ) {
+   if ( 0 == dst_files.nfiles ) {
       while ( src_ptr->name ) {
          res_ptr = link_nodes(res_ptr, src_ptr);
          src_ptr = src_ptr->next;
       }
    /* если кол-во файлов в обоих каталогах равно, сверяю их дату */
-   } else if ( src_files == dst_files ) {
+   } else if ( src_files.nfiles == dst_files.nfiles ) {
       while ( src_ptr->name ) {
          char* test_name = create_dst_filename(srcdir, src_ptr->name, dstdir);
          /* если в каталоге назначения файл есть, и его дата позднее
@@ -437,7 +440,7 @@ dirlist* get_difference(
          /* создаю полное имя исходного файла */
          char* test_name = create_src_filename(dstdir, dst_ptr->name, srcdir);
          /* ищу в исходном каталоге файл с таким именем */
-         dirlist* node = find_by_filename(srclist, test_name);
+         const dirlist* node = find_by_filename(srclist, test_name);
          /* освобождаю память */
          free(test_name);
          /* если в исходном каталоге нет такого файла, продолжаю поиск следующего */
@@ -459,7 +462,7 @@ dirlist* get_difference(
          /* создаю полное имя файла назначения */
          char* test_name = create_dst_filename(srcdir, src_ptr->name, dstdir);
          /* ищу в каталоге назначения файл с этим именем */
-         dirlist* node = find_by_filename(dstlist, test_name);
+         const dirlist* node = find_by_filename(dstlist, test_name);
          /* освобождаю память */
          free(test_name);
          /* если есть, ищу следующий */
@@ -550,28 +553,51 @@ int copy_file(const char* srcname, const char* dstname, time_t srctime) {
    return 0;
 }
 /* связывает ноды */
-dirlist* link_nodes(dirlist* left, dirlist* right) {
+dirlist* link_nodes(dirlist* left, const dirlist* right) {
    left->name = right->name;
    left->date = right->date;
    left->size = right->size;
    left->next = alloc_next();
    return left->next;
 }
-/* считает кол-во файлов */
-u_int64_t total_files(dirlist* dlist) {
+
+void get_dirinfo(dirinfo *di, const dirlist* dlist) {
    u_int64_t count = 0;
-   while ( dlist->name ) {
-      count++;
-      dlist = dlist->next;
-   }
-   return count;
-}
-/* считает суммарный объем */
-u_int64_t total_size(dirlist* dlist) {
    u_int64_t size = 0;
    while ( dlist->name ) {
+      count++;
       size += dlist->size;
+
       dlist = dlist->next;
    }
-   return size;
+
+   di->nfiles = count;
+   di->size = size;
+}
+
+const char* readable_fs(char *buf, u_int64_t fsize) {
+   double size = (double)fsize;
+   unsigned i = 0;
+   static const char* units[] = {"B", "kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"};
+   while (size > 1024u) {
+      size /= 1024u;
+      i++;
+   }
+
+   sprintf(buf, "%.*f %s", i, size, units[i]);
+
+   return buf;
+}
+
+const char* readable_pthread_t(char *buf, pthread_t pt) {
+   char *p = buf;
+   unsigned char *ptc = (unsigned char*)(void*)(&pt);
+   int n = sprintf(p, "0x");
+   p += n;
+   for ( size_t i = 0; i < sizeof(pt); i++ ) {
+      n = sprintf(p, "%02x", (unsigned)(ptc[i]));
+      p += n;
+   }
+   *p = 0;
+   return buf;
 }
