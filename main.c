@@ -8,8 +8,10 @@
 #include <time.h>
 #include <utime.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sendfile.h>
 
 #include <pthread.h>
 
@@ -158,13 +160,13 @@ int main(int argc, char** argv) {
 
     /**  */
     static struct option long_options[] = {
-    {"src", required_argument, 0, 's'},
-    {"dst", required_argument, 0, 'd'},
-    {"threads", required_argument, 0, 't'},
-    {"info", no_argument, 0, 'i'},
-    {"version", no_argument, 0, 'v'},
-    {0,0,0,0}
-};
+        {"src", required_argument, 0, 's'},
+        {"dst", required_argument, 0, 'd'},
+        {"threads", required_argument, 0, 't'},
+        {"info", no_argument, 0, 'i'},
+        {"version", no_argument, 0, 'v'},
+        {0,0,0,0}
+    };
 
     while ( 1 ) {
         int opt = 0, option_index = 0;
@@ -564,25 +566,59 @@ int copy_file(const char* srcname, const char* dstname, time_t srctime) {
     time.modtime = srctime;
     time.actime  = 0;
     /**  */
-    FILE* in = fopen(srcname, "rb");
-    if ( !in ) { return errno; }
-    FILE* out= fopen(dstname, "wb");
-    if ( !out) {
-        fclose(in);
+    int fdin = open(srcname, O_RDONLY);
+    if ( fdin == -1 ) {
         return errno;
     }
-    const int bsize = 1024*256;
-    char buff[bsize];
 
-    int rd;
-    while ( (rd=fread(buff, 1, bsize, in)) > 0 ) {
-        fwrite(buff, 1, rd, out);
+    int fdout= open(dstname, O_WRONLY|O_CREAT|O_TRUNC, 0666);
+    if ( fdout == -1 ) {
+        close(fdin);
+        return errno;
     }
-    fclose(in);
-    fclose(out);
-    /* устанавливаю дату модификации скопированого файла
-      равную дате исходного */
-    utime(dstname, &time);
+
+    struct stat st;
+    if ( fstat(fdin, &st) ) {
+        int ec = errno;
+
+        close(fdin);
+        close(fdout);
+
+        return ec;
+    }
+
+    // sendfile will not send more than this amount of data in one call
+    const size_t max_send_size = 0x7ffff000u;
+    off_t size = st.st_size;
+    off_t offset = 0;
+
+    while ( offset < size ) {
+        off_t size_left = size - offset;
+        size_t size_to_copy = max_send_size;
+
+        if ( size_left < (off_t)(max_send_size) )
+            size_to_copy = (size_t)(size_left);
+
+        ssize_t sz = sendfile(fdout, fdin, NULL, size_to_copy);
+        if ( sz < 0 ) {
+            int err = errno;
+            if (err == EINTR)
+                continue;
+
+            return err;
+        }
+
+        offset += sz;
+    }
+
+    struct timespec ts[2] = {
+         {st.st_atime, 0}
+        ,{st.st_mtime, 0}
+    };
+    futimens(fdout, ts);
+
+    close(fdin);
+    close(fdout);
 
     return 0;
 }
